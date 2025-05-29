@@ -1,15 +1,5 @@
-# email4.dev-mailer
+# email4dev-mailer
 
-To install dependencies:
+This is not meant to run standalone, see the [docker repository](https://github.com/email4-dev/docker)
 
-```bash
-bun install
-```
-
-To run:
-
-```bash
-bun run index.ts
-```
-
-This project was created using `bun init` in bun v1.1.34. [Bun](https://bun.sh) is a fast all-in-one JavaScript runtime.
+Do not post issues here, post them [here](https://github.com/email4-dev/.github/issues)
