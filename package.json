@@ -1,0 +1,23 @@
+{
+  "name": "email4.dev-mailer",
+  "version" : "0.1.0",
+  "module": "index.ts",
+  "type": "module",
+  "devDependencies": {
+    "@types/bun": "^1.2.12"
+  },
+  "peerDependencies": {
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@nats-io/jetstream": "^3.0.2",
+    "@nats-io/nats-core": "^3.0.2",
+    "@nats-io/obj": "^3.0.2",
+    "@nats-io/transport-node": "^3.0.2",
+    "@types/mjml": "^4.7.4",
+    "@types/nodemailer": "^6.4.17",
+    "mjml": "^4.15.3",
+    "nodemailer": "^7.0.2",
+    "pocketbase": "^0.26.0"
+  }
+}
