@@ -16,6 +16,8 @@ interface NatsMessage { form_id: string, fields: {name: string, value: string}[]
 
 const db = new PocketBase(Bun.env.POCKETBASE_URL)
 
+db.autoCancellation(false)
+
 console.log('Email4.dev Mailer Service starting...')
 
 await db.collection('_superusers').authWithPassword(
