@@ -18,7 +18,12 @@ const db = new PocketBase(Bun.env.POCKETBASE_URL)
 
 db.autoCancellation(false)
 
-console.log('Email4.dev Mailer Service starting...')
+const file = Bun.file('package.json')
+const content = await file.text()
+const match = content.match(/"version"\s*:\s*"([^"]+)"/)
+const version = match ? match[1] : '0.0.0'
+
+console.log(`Email4.dev Mailer Service v${version} starting...`)
 
 await db.collection('_superusers').authWithPassword(
     Bun.env.POCKETBASE_EMAIL!,
