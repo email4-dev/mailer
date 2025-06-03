@@ -107,7 +107,7 @@ while (true) {
         if(message.info.pending === 0) break
     }
 
-    if(Bun.env.DEBUG == "true") console.debug(`Received ${buf.length} messages`)
+    if(Deno.env.get("DEBUG") == "true") console.debug(`Received ${buf.length} messages`)
 
     for(let i=0;i<buf.length;i++) {
         const message = buf[i]
