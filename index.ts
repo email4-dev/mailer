@@ -63,7 +63,7 @@ const js = await jetstream(nc)
 const jsm = await jetstreamManager(nc)
 const objm = new Objm(nc)
 
-// const max_messages = parseInt(Bun.env.MAX_MESSAGES!) || 10
+const max_messages = parseInt(Deno.env.get("MAX_MESSAGES")) || 10
 // const expires = parseInt(Bun.env.INTERVAL!) * 1000 || 10_000
 
 nc.closed().then((err) => {
@@ -96,12 +96,21 @@ try {
 
 const c = await js.consumers.get("messages", "mailer")
 const bucket = await objm.create("attachments", { storage: StorageType.File })
-let sub = await c.consume()
+//let sub = await c.consume()
 //const interval = setInterval(async() => sub = await c.consume({ max_messages }), expires)
-
-try {
-    for await (const message of sub) {
+const buf = []
+while (true) {
+    const iter = await c.fetch({ max_messages })
+    for await (const message of iter) {
         message.working()
+        buf.push(message)
+        if(message.info.pending === 0) break
+    }
+
+    if(Bun.env.DEBUG == "true") console.debug(`Received ${buf.length} messages`)
+
+    for(let i=0;i<buf.length;i++) {
+        const message = buf[i]
 
         const { form_id, fields, attachments } = message.json() as NatsMessage
 
@@ -172,6 +181,7 @@ try {
                     return null
                 } else {
                     return {
+                        // @ts-expect-error
                         filename: `${a.name}_${a.filename}`,
                         content: objectToNodeStream(file!.data)
                     } as Attachment
@@ -230,9 +240,5 @@ try {
         transporter.close()
 
         attachments.forEach(async a => await bucket.delete(a.key))
-
-        if(message.info.pending === 0) break
     }
-} catch(err: any) {
-    console.warn(`Failed to process messages: ${(err as Error).message}`)
 }
