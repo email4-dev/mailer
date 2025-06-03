@@ -5,7 +5,8 @@ import nodemailer, {type SendMailOptions} from "nodemailer"
 import PocketBase from 'pocketbase'
 import mjml2html from 'mjml'
 import type { Attachment } from "nodemailer/lib/mailer"
-import { Readable } from "stream"
+import { Readable } from "node:stream"
+import process from "node:process"
 
 const mjmlOptions = {
     keepComments: false,
@@ -14,20 +15,19 @@ const mjmlOptions = {
 
 interface NatsMessage { form_id: string, fields: {name: string, value: string}[], attachments: {name: string, key: string}[]}
 
-const db = new PocketBase(Bun.env.POCKETBASE_URL)
+const db = new PocketBase(Deno.env.get("POCKETBASE_URL"))
 
 db.autoCancellation(false)
 
-const file = Bun.file('package.json')
-const content = await file.text()
+const content = await Deno.readTextFile('package.json')
 const match = content.match(/"version"\s*:\s*"([^"]+)"/)
 const version = match ? match[1] : '0.0.0'
 
 console.log(`Email4.dev Mailer Service v${version} starting...`)
 
 await db.collection('_superusers').authWithPassword(
-    Bun.env.POCKETBASE_EMAIL!,
-    Bun.env.POCKETBASE_PASS!,
+    Deno.env.get("POCKETBASE_EMAIL"),
+    Deno.env.get("POCKETBASE_PASS"),
 )
 
 if(!db.authStore.isValid) {
@@ -55,7 +55,7 @@ function giveUp(msg: JsMsg, error: string) {
 }
 
 const nc = await connect({
-    servers: Bun.env.NATS_HOST,
+    servers: Deno.env.get("NATS_HOST"),
     maxReconnectAttempts: -1, // Infinite retries
     reconnectTimeWait: 1000, // 1 second between retries
 })
@@ -105,14 +105,14 @@ try {
 
         const { form_id, fields, attachments } = message.json() as NatsMessage
 
-        if(Bun.env.DEBUG == "true") console.debug(`New message for form ${form_id} with ${attachments.length} attachments and fields: ${JSON.stringify(fields)}`)
+        if(Deno.env.get("DEBUG") == "true") console.debug(`New message for form ${form_id} with ${attachments.length} attachments and fields: ${JSON.stringify(fields)}`)
 
         const form = await db.collection('forms').getOne(form_id, {
             expand: 'handler,handler.template,handler.gateway',
             fields: '*,expand.handler.*,expand.handler.template.*,expand.handler.gateway.*'
         }).then(data => data).catch(() => null)
 
-        if(Bun.env.DEBUG == "true") console.debug(`Form ${form_id} data: ${JSON.stringify(form)}`)
+        if(Deno.env.get("DEBUG") == "true") console.debug(`Form ${form_id} data: ${JSON.stringify(form)}`)
 
         if(form === null) {
             giveUp(message, `Form with id ${form_id} was not found!`)
@@ -222,7 +222,7 @@ try {
                 for (const rejected of info.rejected) {
                     console.warn(`Message ${info.messageId} was rejected by ${rejected}`)
                 }
-                if(Bun.env.DEBUG == "true") console.debug(`Message ${info.messageId} was sent`)
+                if(Deno.env.get("DEBUG") == "true") console.debug(`Message ${info.messageId} was sent`)
                 message.ack()
             }
         })
