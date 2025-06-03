@@ -63,8 +63,8 @@ const js = await jetstream(nc)
 const jsm = await jetstreamManager(nc)
 const objm = new Objm(nc)
 
-const max_messages = parseInt(Bun.env.MAX_MESSAGES!) || 10
-const expires = parseInt(Bun.env.INTERVAL!) * 1000 || 10_000
+// const max_messages = parseInt(Bun.env.MAX_MESSAGES!) || 10
+// const expires = parseInt(Bun.env.INTERVAL!) * 1000 || 10_000
 
 nc.closed().then((err) => {
     if(err) {
@@ -96,7 +96,7 @@ try {
 
 const c = await js.consumers.get("messages", "mailer")
 const bucket = await objm.create("attachments", { storage: StorageType.File })
-let sub = await c.consume({ max_messages, expires })
+let sub = await c.consume()
 //const interval = setInterval(async() => sub = await c.consume({ max_messages }), expires)
 
 try {
