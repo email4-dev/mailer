@@ -1,18 +1,10 @@
-import { connect } from "@nats-io/transport-node"
-import { AckPolicy, DeliverPolicy, jetstream, jetstreamManager, StorageType, type JsMsg } from "@nats-io/jetstream"
-import { Objm } from "@nats-io/obj"
-import nodemailer, {type SendMailOptions} from "nodemailer"
 import PocketBase from 'pocketbase'
-import mjml2html from 'mjml'
-import type { Attachment } from "nodemailer/lib/mailer"
-import { Readable } from "stream"
-
-const mjmlOptions = {
-    keepComments: false,
-    minify: true,
-}
-
-interface NatsMessage { form_id: string, fields: {name: string, value: string}[], attachments: {name: string, key: string}[]}
+import Valkey from 'iovalkey'
+import * as Minio from 'minio'
+import { mail, initTransporter } from "./mailer"
+import { build } from './builder'
+import { setTimeout } from 'node:timers/promises'
+import type Mail from 'nodemailer/lib/mailer'
 
 const db = new PocketBase(Bun.env.POCKETBASE_URL)
 
@@ -22,8 +14,27 @@ const file = Bun.file('package.json')
 const content = await file.text()
 const match = content.match(/"version"\s*:\s*"([^"]+)"/)
 const version = match ? match[1] : '0.0.0'
+const serviceName = Bun.argv.includes('--retrier') ? 'Retry Mailer' : 'Mailer'
 
-console.log(`Email4.dev Mailer Service v${version} starting...`)
+console.log(`Email4.dev ${serviceName} Service v${version} starting...`)
+
+const smtpOptions: SMTPConnectionOptions = {
+    hostname: Bun.env.SMTP_HOSTNAME || '',
+    port: parseInt(Bun.env.SMTP_PORT || '465'),
+    security: (Bun.env.SMTP_SECURITY as SMTPConnectionOptions["security"]) || 'ssl',
+    auth: (Bun.env.SMTP_AUTH as SMTPConnectionOptions["auth"]) || 'plain',
+    username: Bun.env.SMTP_USERNAME || '',
+    password: Bun.env.SMTP_PASSWORD || '',
+}
+
+if(!smtpOptions.hostname || !smtpOptions.username || !smtpOptions.password) {
+    throw('SMTP variables missing!')
+}
+
+if(Bun.env.SMTP_PRIVATE_KEY) smtpOptions.private_key = Bun.env.SMTP_PRIVATE_KEY
+if(Bun.env.SMTP_ACCESS_URL) smtpOptions.access_url = Bun.env.SMTP_ACCESS_URL
+
+const transporter = initTransporter(smtpOptions)
 
 await db.collection('_superusers').authWithPassword(
     Bun.env.POCKETBASE_EMAIL!,
@@ -34,212 +45,204 @@ if(!db.authStore.isValid) {
     throw('Pocketbase authentication failed!')
 }
 
-// helper functions
-function objectToNodeStream(objectStream: ReadableStream<Uint8Array>): Readable {
-  const reader = objectStream.getReader()
-  return new Readable({
-    async read() {
-      const { done, value } = await reader.read()
-      if (done) {
-        this.push(null)
-      } else {
-        this.push(value)
-      }
-    }
-  })
-}
-
-function giveUp(msg: JsMsg, error: string) {
-    console.warn(error)
-    msg.term(error)
-}
-
-const nc = await connect({
-    servers: Bun.env.NATS_HOST,
-    maxReconnectAttempts: -1, // Infinite retries
-    reconnectTimeWait: 1000, // 1 second between retries
+const valkey = new Valkey(6379, 'valkey') // non-blocking connection
+const sub = new Valkey(6379, 'valkey') // main worker connection
+const consumerName = Bun.argv.includes('--retrier') ? `retrier-${process.pid}` : `mailer-${process.pid}`
+const consumerGroup = Bun.argv.includes('--retrier') ? 'retrier-group' : 'mailer-group'
+const stream = Bun.argv.includes('--retrier') ? 'retry_queue' : 'messages'
+const minio = new Minio.Client({
+    endPoint: 'minio',
+    port: 9000,
+    accessKey: Bun.env.MINIO_ROOT_USER!,
+    secretKey: Bun.env.MINIO_ROOT_PASSWORD!,
+    useSSL: false,
+    pathStyle: true
 })
-const js = await jetstream(nc)
-const jsm = await jetstreamManager(nc)
-const objm = new Objm(nc)
 
-const max_messages = parseInt(Bun.env.MAX_MESSAGES!) || 10
-// const expires = parseInt(Bun.env.INTERVAL!) * 1000 || 10_000
-
-nc.closed().then((err) => {
+valkey.on("error", (err) => {
     if(err) {
-        console.error('NATS disconnected', err.message)
+        throw err
     } else {
-        console.error('NATS disconnected')
+        throw 'Valkey disconnected'
     }
-    process.exit(1)
 })
 
 process.on("beforeExit", async () => {
     console.log('Email4.dev Mailer exiting gracefully...')
-    //clearInterval(interval)
+    transporter.close()
     db.authStore.clear()
-    await nc.drain()
+    await valkey.quit()
+    await sub.quit()
 })
 
-try {
-    const consumerInfo = await jsm.consumers.info("messages", "mailer")
-} catch (err: any) {
-    console.warn('Consumer not found, creating it...')
-    await jsm.consumers.add("messages", {
-        durable_name: "mailer",
-        ack_policy: AckPolicy.Explicit,
-        deliver_policy: DeliverPolicy.All,
-        ack_wait: 60 * 1000, // 1 minute
-    })
+const streamExists = await sub.exists(stream)
+
+if(streamExists === 0) {
+    throw `${stream} stream does not exist!`
 }
 
-const c = await js.consumers.get("messages", "mailer")
-const bucket = await objm.create("attachments", { storage: StorageType.File })
-//let sub = await c.consume()
-//const interval = setInterval(async() => sub = await c.consume({ max_messages }), expires)
-
-const buf = []
-
-while (true) {
-    const iter = await c.fetch({ max_messages })
-    for await (const message of iter) {
-        message.working()
-        buf.push(message)
-        if(message.info.pending === 0) break
+try {
+    await sub.xgroup('CREATE', stream, consumerGroup, '0')
+} catch (err) {
+    if (!(err as Error).message.includes('BUSYGROUP')) {
+        throw err
     }
+}
 
-    if(Bun.env.DEBUG == "true") console.debug(`Received ${buf.length} messages`)
-
-    for(let i=0;i<buf.length;i++) {
-        const message = buf[i]
-        const { form_id, fields, attachments } = message.json() as NatsMessage
-
-        if(Bun.env.DEBUG == "true") console.debug(`New message for form ${form_id} with ${attachments.length} attachments and fields: ${JSON.stringify(fields)}`)
-
-        const form = await db.collection('forms').getOne(form_id, {
-            expand: 'handler,handler.template,handler.gateway',
-            fields: '*,expand.handler.*,expand.handler.template.*,expand.handler.gateway.*'
-        }).then(data => data).catch(() => null)
-
-        if(form === null) {
-            giveUp(message, `Form with id ${form_id} was not found!`)
-            continue
-        } else {
-            if(Bun.env.DEBUG == "true") console.debug(`Form ${form_id} data: ${JSON.stringify(form)}`)
-
-            if(form.handler === null) {
-                giveUp(message, `Form with id ${form_id} has no linked handler!`)
-                continue
-            }
-
-            if(form.expand?.handler.expand?.template === null) {
-                giveUp(message, `Form with id ${form_id} has no linked template!`)
-                continue
-            }
-
-            if(form.expand?.handler.expand?.gateway === null) {
-                giveUp(message, `Handler of form with id ${form_id} has no linked gateway!`)
-                continue
-            }
-
-            let html:string = form.expand?.handler.expand?.template.type === 'mjml' ? mjml2html(form.expand?.handler.expand?.template.code, mjmlOptions) : form.expand?.handler.expand?.template.code
-            let text:string = form.expand?.handler.expand?.template.text
-            let subject:string = form.expand?.handler.expand?.template.subject
-            let replyTo:string|null = null
-            if(form.expand?.handler.reply_to.length) {
-                if(form.expand?.handler.reply_to.indexOf('{') > -1) {
-                    const replyToField = form.expand?.handler.reply_to.replaceAll(/{|}/, '')
-                    const replyToValue = fields.find(f => f.name === replyToField)
-                    if(replyToValue) replyTo = form.expand?.handler.reply_to.replace(`{${replyToField}}`, replyToValue)
-                } else {
-                    replyTo = form.expand?.handler.reply_to
+const parseRedisMessage = (id:string, message: string[]) => {
+    let result: Partial<Message> = { id }
+    for (let i=0; i<message.length; i+=2) {
+        switch(message[i]) {
+            case 'hex':
+                result.hex = message[i+1]
+                break
+            case 'form_id':
+                result.form_id = message[i+1]
+                break
+            case 'fields':
+                try {
+                    result.fields = JSON.parse(message[i+1])
+                } catch(error) {
+                    console.warn(`Invalid message format for message ${id}`, message)
+                    return null
                 }
-            }
-
-            for (const field of fields) {
-                html = html.replaceAll(`{${field.name}}`, field.value).replaceAll(/\r?\n|\r/g, '<br>')
-                text = text.replaceAll(`{${field.name}}`, field.value)
-                subject = subject.replaceAll(`{${field.name}}`, field.value)
-            }
-
-            const email:SendMailOptions = {
-                subject,
-                from: form.expand?.handler.from_name.length ? `${form.expand?.handler.from_name} <${form.expand?.handler.from_email}>` : form.expand?.handler.from_email,
-                to: form.expand?.handler.to,
-            }
-
-            if(html.length) email.html = html
-            if(text.length) email.text = text
-            if(replyTo) email.replyTo = replyTo
-
-            if(attachments.length) {
-                email.attachments = await Promise.all(attachments.map(async a => {
-                    const file = await bucket.get(a.key)
-                    if(file?.error) {
-                        console.warn(`Error loading attachment ${a.key}: ${file?.error}`)
-                        return null
-                    } else {
-                        return {
-                            // @ts-expect-error
-                            filename: `${a.name}_${a.filename}`,
-                            content: objectToNodeStream(file!.data)
-                        } as Attachment
-                    }
-                }).filter(x => x)) as Attachment[]
-            }
-
-            const message_id = message.headers?.get('Nats-Msg-Id')
-
-            const connectionInfo = {
-                host: form.expand?.handler.expand?.gateway.hostname,
-                port: form.expand?.handler.expand?.gateway.port,
-                secure: form.expand?.handler.expand?.gateway.security === 'ssl',
-                auth: {},
-            }
-
-            switch(form.expand?.handler.expand?.gateway.auth) {
-                case 'gmail':
-                    connectionInfo.auth = {
-                        type: "OAuth2",
-                        user: form.expand?.handler.expand?.gateway.username,
-                        serviceClient: form.expand?.handler.expand?.gateway.password,
-                        privateKey: form.expand?.handler.expand?.gateway.private_key,
-                    }
-                    break
-                case 'oauth2':
-                    connectionInfo.auth = {
-                        type: "OAuth2",
-                        user: form.expand?.handler.expand?.gateway.username,
-                        accessToken: form.expand?.handler.expand?.gateway.password,
-                        accessUrl: form.expand?.handler.expand?.gateway.access_url,
-                        }
-                    break
-                default: // plain
-                    connectionInfo.auth = {
-                        user: form.expand?.handler.expand?.gateway.username,
-                        pass: form.expand?.handler.expand?.gateway.password,
-                    }
-                    break
-            }
-
-            const transporter = nodemailer.createTransport(connectionInfo)
-            await transporter.sendMail(email, (error, info) => {
-                if(error) {
-                    giveUp(message, `Error sending ${message_id}: ${error.message}`)
-                } else {
-                    // message_id leaves the queue, use info.messageId, which is the id assigned by the MTA from now on
-                    for (const rejected of info.rejected) {
-                        console.warn(`Message ${info.messageId} was rejected by ${rejected}`)
-                    }
-                    if(Bun.env.DEBUG == "true") console.debug(`Message ${info.messageId} was sent`)
-                    message.ack()
+                break
+            case 'origin':
+                result.origin = message[i+1]
+                break
+            case 'attachment_count':
+                result.attachment_count = parseInt(message[i+1])
+                if(isNaN(result.attachment_count)) {
+                    console.warn(`Invalid message format for message ${id}`, message)
+                    return null
                 }
-            })
-
-            transporter.close()
-
-            attachments.forEach(async a => await bucket.delete(a.key))
+                break
+            case 'fail_count':
+                result.fail_count = parseInt(message[i+1])
+                if(isNaN(result.fail_count)) {
+                    console.warn(`Invalid message format for message ${id}`, message)
+                    return null
+                }
+                break
         }
     }
+    return result as Message
+}
+
+const pendingMessages = await sub.xpending(stream, consumerGroup)
+// @ts-expect-error
+const pendingMessageCount = parseInt(pendingMessages[0]) || 0
+if(pendingMessageCount > 0) {
+    const idleTime = Bun.argv.includes('--retrier') ? 5_400_000 : 300_000 // 90 minutes for retry_queue, 5 minutes for messages queue
+    const entries: any[] = await sub.xautoclaim(stream, consumerGroup, consumerName, idleTime, '0-0')
+    if(Bun.env.DEBUG == "true") console.debug('Reading pending entries', entries)
+    if(!entries || !entries[1].length) {
+        console.info('No pending entries found.')
+    } else {
+        console.info(`Found ${entries[1].length} pending entries. Processing those first...`)
+        await processStream(entries[1])
+    }
+}
+
+while(true) {
+    const entries: any[] = await sub.xreadgroup('GROUP', consumerGroup, consumerName, 'COUNT', (parseInt(Bun.env.CONSUMER_BATCH_SIZE!) || 5), 'BLOCK', (parseInt(Bun.env.CONSUMER_BLOCK!) || 10) * 1000, 'STREAMS', stream, '>')
+    if(!entries || !entries[0].length || !entries[0][1].length) continue
+    if(Bun.env.DEBUG == "true") console.debug('Reading entries', entries)
+    await processStream(entries[0][1])
+}
+
+async function processStream(entries: any[]) {
+    for(const stream of entries) {
+        if(Bun.env.DEBUG == "true") console.debug(`Reading message ${stream[0]}`, stream[1])
+        const message = parseRedisMessage(stream[0], stream[1])
+        if(message){
+            if(Bun.argv.includes('--retrier')) {
+                (async () => {
+                    await setTimeout(message.fail_count! * (parseInt(Bun.env.RETRY_INTERVAL!) || 15) * 60 * 1000) // 15/30/45/60/75 minutes
+                    await processMessage(message)
+                })()
+            } else {
+                await processMessage(message)
+            }
+        } else {
+            const attachment_count = parseInt(stream[1][8]) || 0
+            if(attachment_count > 0) await clearAttachments(stream[1][1])
+            await valkey.lpush('failed', ...stream[1])
+            await valkey.hdel(stream[1][1], 'stream_id')
+            await valkey.xdel('messages', stream[0])
+        }
+    }
+}
+
+async function clearAttachments(hex: string) {
+    const attachments = await valkey.hgetall(`attachments:${hex}`)
+    if(attachments) {
+        const files:MessageAttachment[] = JSON.parse(attachments.files) || []
+        if(files.length) await minio.removeObjects('attachments', files.map(a => a.key))
+        await valkey.hdel(`attachments:${hex}`)
+    }
+}
+
+async function processMessage(message: Message) {
+    if(Bun.env.DEBUG == "true") console.debug(`New message via ${message.origin} for form ${message.form_id} with ${message.attachment_count} attachments and fields:`, message.fields)
+
+    const form = await db.collection('forms').getOne(message.form_id!, {
+        expand: 'handler,handler.template',
+        fields: '*,expand.handler.*,expand.handler.template.*'
+    }).then(data => data).catch(() => null)
+
+    if(!form) {
+        await valkey.lpush('failed', 'hex', message.hex, 'form_id', message.form_id, 'fields', JSON.stringify(message.fields), 'origin', message.origin, 'attachment_count', message.attachment_count, 'error', 'form not found')
+        await valkey.hdel(message.hex, 'stream_id')
+        await valkey.xdel('messages', message.id)
+        await clearAttachments(message.hex)
+        return
+    }
+
+    let email: Error | Mail.Options
+
+    if(message.hex === 'otp') {
+        email = {
+            subject: `OTP Code: ${message.fields[0].value}`,
+            html: `<p>You have requested access to protected email4.dev resources.</p><p>Your OTP code is: <strong>${message.fields[0].value}</strong></p>`,
+            text: `You have requested access to protected email4.dev resources.\n\nYour OTP code is:\n${message.fields[0].value}`,
+            from: form.expand?.handler.from_name.length ? `${form.expand?.handler.from_name} <${form.expand?.handler.from_email}>` : form.expand?.handler.from_email,
+            to: form.expand?.handler.to,
+        }
+    } else {
+        email = await build(form, message.fields, message.origin, message.attachment_count > 0 ? `${Bun.env.API_URL}attachments/${message.hex}` : null)
+    }
+
+    if(email instanceof Error) {
+        console.warn(email.message)
+        if(!form?.allow_duplicates) await valkey.hdel(message.hex, 'stream_id')
+        if(message.attachment_count) await clearAttachments(message.hex)
+        await valkey.xdel('messages', message.id)
+        return
+    }
+
+    const smtpResult: Boolean | Error = await mail(email, message.hex, transporter)
+    
+    if(smtpResult instanceof Error) {
+        console.warn(smtpResult.message)
+        if(!form?.allow_duplicates) await valkey.hdel(message.hex, 'stream_id')
+        if(message.attachment_count) await clearAttachments(message.hex)
+        await valkey.xdel('messages', message.id)
+        return
+    }
+
+    if(smtpResult === false) {
+        if(Bun.argv.includes('--retrier')) {
+            if(message.fail_count! >= (parseInt(Bun.env.MAILER_RETRIES!) || 5)) {
+                await valkey.lpush('failed', 'hex', message.hex, 'form_id', message.form_id, 'fields', JSON.stringify(message.fields), 'origin', message.origin, 'attachment_count', message.attachment_count, 'error', 'max retries reached')
+            } else {
+                await valkey.xadd('retry_queue', message.id, 'hex', message.hex, 'form_id', message.form_id, 'fields', JSON.stringify(message.fields), 'origin', message.origin, 'attachment_count', message.attachment_count, 'fail_count', message.fail_count! + 1)
+            }
+        } else {
+            await valkey.xadd('retry_queue', message.id, 'hex', message.hex, 'form_id', message.form_id, 'fields', JSON.stringify(message.fields), 'origin', message.origin, 'attachment_count', message.attachment_count, 'fail_count', '1')
+        }
+    }
+
+    if(!form?.allow_duplicates) await valkey.hdel(message.hex, 'stream_id')
+    await valkey.xdel('messages', message.id)
 }
