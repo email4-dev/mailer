@@ -168,7 +168,7 @@ async function processStream(entries: any[]) {
             const attachment_count = parseInt(stream[1][8]) || 0
             if(attachment_count > 0) await clearAttachments(stream[1][1])
             await valkey.lpush('failed', ...stream[1])
-            await valkey.hdel(stream[1][1], 'stream_id')
+            await valkey.del(`streams:${stream[1][1]}`)
             await valkey.xdel('messages', stream[0])
         }
     }
@@ -179,7 +179,7 @@ async function clearAttachments(hex: string) {
     if(attachments) {
         const files:MessageAttachment[] = JSON.parse(attachments.files) || []
         if(files.length) await minio.removeObjects('attachments', files.map(a => a.key))
-        await valkey.hdel(`attachments:${hex}`)
+        await valkey.del(`attachments:${hex}`)
     }
 }
 
@@ -193,7 +193,7 @@ async function processMessage(message: Message) {
 
     if(!form) {
         await valkey.lpush('failed', 'hex', message.hex, 'form_id', message.form_id, 'fields', JSON.stringify(message.fields), 'origin', message.origin, 'attachment_count', message.attachment_count, 'error', 'form not found')
-        await valkey.hdel(message.hex, 'stream_id')
+        await valkey.del(`streams:${message.hex}`)
         await valkey.xdel('messages', message.id)
         await clearAttachments(message.hex)
         return
@@ -215,7 +215,7 @@ async function processMessage(message: Message) {
 
     if(email instanceof Error) {
         console.warn(email.message)
-        if(!form?.allow_duplicates) await valkey.hdel(message.hex, 'stream_id')
+        if(!form?.allow_duplicates) await valkey.del(`streams:${message.hex}`)
         if(message.attachment_count) await clearAttachments(message.hex)
         await valkey.xdel('messages', message.id)
         return
@@ -225,7 +225,7 @@ async function processMessage(message: Message) {
     
     if(smtpResult instanceof Error) {
         console.warn(smtpResult.message)
-        if(!form?.allow_duplicates) await valkey.hdel(message.hex, 'stream_id')
+        if(!form?.allow_duplicates) await valkey.del(`streams:${message.hex}`)
         if(message.attachment_count) await clearAttachments(message.hex)
         await valkey.xdel('messages', message.id)
         return
@@ -243,6 +243,6 @@ async function processMessage(message: Message) {
         }
     }
 
-    if(!form?.allow_duplicates) await valkey.hdel(message.hex, 'stream_id')
+    if(!form?.allow_duplicates) await valkey.del(`streams:${message.hex}`)
     await valkey.xdel('messages', message.id)
 }
