@@ -27,7 +27,7 @@ export const initTransporter = (options: SMTPConnectionOptions) => {
                 user: options.username,
                 accessToken: options.password,
                 accessUrl: options.access_url,
-                }
+            }
             break
         default: // plain
             connectionInfo.auth = {
