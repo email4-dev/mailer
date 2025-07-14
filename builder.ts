@@ -73,11 +73,14 @@ export const build = async (form: RecordModel|null, fields: MessageField[], orig
             }
         }
 
+        const fromEmail = form.expand?.handler.from_email ?? Bun.env.SMTP_USERNAME
+        const fromName = form.expand?.handler.from_name.length ?? 'Email4.dev Mail Service'
+
         const email:SendMailOptions = {
             subject,
             html,
             text,
-            from: form.expand?.handler.from_name.length ? `${form.expand?.handler.from_name} <${form.expand?.handler.from_email}>` : form.expand?.handler.from_email,
+            from: `${fromName} <${fromEmail}>`,
             to: form.expand?.handler.to,
         }
 
