@@ -2,11 +2,6 @@ import mjml2html from 'mjml'
 import type { RecordModel } from 'pocketbase'
 import type { SendMailOptions } from 'nodemailer'
 
-const mjmlOptions = {
-    keepComments: false,
-    minify: true,
-}
-
 export const build = async (form: RecordModel|null, fields: MessageField[], origin: string, downloadUrl: string|null = null) => {
     if(form === null) {
         return new Error('Form was not found!')
@@ -19,7 +14,7 @@ export const build = async (form: RecordModel|null, fields: MessageField[], orig
 
         let html:string = ''
         let text:string = ''
-        let subject:string = ''
+        let subject = `New message via ${origin}`
 
         const fieldGroups = fields.reduce((acc: {[key: string]: string[]}, field) => {
             const normalizedName = field.name.replace('[]', '')
@@ -28,23 +23,41 @@ export const build = async (form: RecordModel|null, fields: MessageField[], orig
             return acc
         }, {})
 
-        if(form.expand?.handler.expand?.template) {
-            html = form.expand?.handler.expand?.template.type === 'mjml' ? mjml2html(form.expand?.handler.expand?.template.code, mjmlOptions) : form.expand?.handler.expand?.template.code
-            text = form.expand?.handler.expand?.template.text
-            subject = form.expand?.handler.expand?.template.subject
+        if(form.template_subject.length) {
+            subject = form.template_subject
             for (const [name, values] of Object.entries(fieldGroups)) {
-                html = html.replaceAll(`{${name}}`, values.join(', '))
-                text = text.replaceAll(`{${name}}`, values.join(', '))
                 subject = subject.replaceAll(`{${name}}`, values.join(', '))
             }
+        }
+
+        if(form.template_code.length) {
+            try {
+                const mjml = mjml2html(form.template_code, {
+                    keepComments: false,
+                    minify: true,
+                    validationLevel: "strict"
+                })
+                html = mjml.html
+            } catch (err: any) {
+                html = form.template_code
+            }
+            for (const [name, values] of Object.entries(fieldGroups)) {
+                html = html.replaceAll(`{${name}}`, values.join(', '))
+            }
         } else {
-            subject = `New message via ${origin}`
             html = '<table style="border-collapse: collapse; width: 600px;" border="1" cellspacing="5" cellpadding="5"><tbody>'
             for (const [name, values] of Object.entries(fieldGroups)) {
                 html += `<tr><th width="33.3333%">${name}</th><td width="66.6666%">${values.join(', ')}</td></tr>`
                 text += `${name}\n${values.join(', ')}\n\n`
             }
             html += '</tbody></table>'
+        }
+
+        if(form.template_text.length) {
+            text = form.template_text
+            for (const [name, values] of Object.entries(fieldGroups)) {
+                text = text.replaceAll(`{${name}}`, values.join(', '))
+            }
         }
 
         html = html.replaceAll(/\r?\n|\r/g, '<br>')

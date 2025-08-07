@@ -187,8 +187,8 @@ async function processMessage(message: Message) {
     if(Bun.env.DEBUG == "true") console.debug(`New message via ${message.origin} for form ${message.form_id} with ${message.attachment_count} attachments and fields:`, message.fields)
 
     const form = await db.collection('forms').getOne(message.form_id!, {
-        expand: 'handler,handler.template',
-        fields: '*,expand.handler.*,expand.handler.template.*'
+        expand: 'handler',
+        fields: '*,expand.handler.*'
     }).then(data => data).catch(() => null)
 
     if(!form) {
