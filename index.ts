@@ -241,6 +241,20 @@ async function processMessage(message: Message) {
         } else {
             await valkey.xadd('retry_queue', message.id, 'hex', message.hex, 'form_id', message.form_id, 'fields', JSON.stringify(message.fields), 'origin', message.origin, 'attachment_count', message.attachment_count, 'fail_count', '1')
         }
+    } else {
+        const date = new Date()
+        const statsMonth = `${date.getFullYear()}${(date.getMonth() + 1).toString().padStart(2, "0")}` // e.g. 202501
+        try {
+            const curStats = await db.collection('stats').getFirstListItem(`month="${statsMonth}"`)
+            await db.collection('stats').update(curStats.id, {
+                sent: curStats.sent + 1
+            })
+        } catch (err: any) {
+            await db.collection('stats').create({
+                month: statsMonth,
+                sent: 1
+            })
+        }
     }
 
     if(!form?.allow_duplicates) await valkey.del(`streams:${message.hex}`)
