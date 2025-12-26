@@ -45,19 +45,25 @@ if(!db.authStore.isValid) {
     throw('Pocketbase authentication failed!')
 }
 
-const valkey = new Valkey(6379, 'valkey') // non-blocking connection
-const sub = new Valkey(6379, 'valkey') // main worker connection
+const valkey = new Valkey(6379, Bun.env.VALKEY_URL!) // non-blocking connection
+const sub = new Valkey(6379, Bun.env.VALKEY_URL!) // main worker connection
 const consumerName = Bun.argv.includes('--retrier') ? `retrier-${process.pid}` : `mailer-${process.pid}`
 const consumerGroup = Bun.argv.includes('--retrier') ? 'retrier-group' : 'mailer-group'
 const stream = Bun.argv.includes('--retrier') ? 'retry_queue' : 'messages'
+const bucket = Bun.env.S3_BUCKET!
 const minio = new Minio.Client({
-    endPoint: 'minio',
-    port: 9000,
-    accessKey: Bun.env.MINIO_ROOT_USER!,
-    secretKey: Bun.env.MINIO_ROOT_PASSWORD!,
-    useSSL: false,
-    pathStyle: true
+    endPoint: Bun.env.S3_URL!,
+    port: parseInt(Bun.env.S3_PORT!),
+    accessKey: Bun.env.S3_ACCESS_KEY!,
+    secretKey: Bun.env.S3_SECRET_KEY!,
+    useSSL: (Bun.env.S3_SSL! === "true"),
+    region: Bun.env.S3_REGION!,
 })
+
+const bucketExists = await minio.bucketExists(bucket)
+if (!bucketExists) {
+  throw 'S3 bucket missing!'
+}
 
 valkey.on("error", (err) => {
     if(err) {
@@ -178,7 +184,7 @@ async function clearAttachments(hex: string) {
     const attachments = await valkey.hgetall(`attachments:${hex}`)
     if(attachments) {
         const files:MessageAttachment[] = JSON.parse(attachments.files) || []
-        if(files.length) await minio.removeObjects('attachments', files.map(a => a.key))
+        if(files.length) await minio.removeObjects(bucket, files.map(a => a.key))
         await valkey.del(`attachments:${hex}`)
     }
 }
