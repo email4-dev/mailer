@@ -38,7 +38,9 @@ const transporter = initTransporter(smtpOptions)
 
 await db.collection('_superusers').authWithPassword(
     Bun.env.POCKETBASE_EMAIL!,
-    Bun.env.POCKETBASE_PASS!,
+    Bun.env.POCKETBASE_PASS!, {
+        autoRefreshThreshold: 30 * 60
+    }
 )
 
 if(!db.authStore.isValid) {
@@ -182,7 +184,7 @@ async function processStream(entries: any[]) {
 
 async function clearAttachments(hex: string) {
     const attachments = await valkey.hgetall(`attachments:${hex}`)
-    if(attachments) {
+    if(attachments && attachments.files) {
         const files:MessageAttachment[] = JSON.parse(attachments.files) || []
         if(files.length) await minio.removeObjects(bucket, files.map(a => a.key))
         await valkey.del(`attachments:${hex}`)
