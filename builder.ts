@@ -14,7 +14,7 @@ export const build = async (form: RecordModel|null, fields: MessageField[], orig
 
         let html:string = ''
         let text:string = ''
-        let subject = `New message via ${origin}`
+        let subject = `New message via ${origin.replace('/^https?:\/\//', '')}` // remove the protocol as it triggers some spam filters
 
         const fieldGroups = fields.reduce((acc: {[key: string]: string[]}, field) => {
             const normalizedName = field.name.replace('[]', '')
@@ -87,7 +87,7 @@ export const build = async (form: RecordModel|null, fields: MessageField[], orig
         }
 
         const fromEmail = form.expand?.handler.from_email ?? Bun.env.SMTP_USERNAME
-        const fromName = form.expand?.handler.from_name.length ?? 'Email4.dev Mail Service'
+        const fromName = form.expand?.handler.from_name ?? 'Email4.dev Mail Service'
 
         const email:SendMailOptions = {
             subject,
