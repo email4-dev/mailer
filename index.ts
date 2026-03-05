@@ -7,7 +7,6 @@ import { setTimeout } from 'node:timers/promises'
 import type Mail from 'nodemailer/lib/mailer'
 
 const db = new PocketBase(Bun.env.POCKETBASE_URL)
-
 db.autoCancellation(false)
 
 const file = Bun.file('package.json')
