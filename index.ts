@@ -83,14 +83,8 @@ process.on("beforeExit", async () => {
     await sub.quit()
 })
 
-const streamExists = await sub.exists(stream)
-
-if(streamExists === 0) {
-    throw `${stream} stream does not exist!`
-}
-
 try {
-    await sub.xgroup('CREATE', stream, consumerGroup, '0')
+    await sub.xgroup('CREATE', stream, consumerGroup, '0', 'MKSTREAM')
 } catch (err) {
     if (!(err as Error).message.includes('BUSYGROUP')) {
         throw err
